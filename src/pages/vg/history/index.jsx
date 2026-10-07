@@ -1,76 +1,12 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend } from 'recharts';
-import { fetchSales, fetchExpenses, fetchUnitCosts, fetchStaffLogsForYear } from '../../../lib/vg/api.js';
-import { supabase } from '../../../lib/supabase.js';
+import { fetchHistoryRows } from '../../../lib/vg/historyApi.js';
 
-// Build accommodation chart data from vg_accomm_sales_history for a given calendar year.
-// The history table uses financial_year (Mar-Feb) + month. We need calendar months Jan-Dec.
-// e.g. calendar year 2025: Jan-Feb comes from FY 2024-2025, Mar-Dec from FY 2025-2026.
-function buildAccommCalendarData(histRows, year) {
-  const fyPrev = `${year - 1}-${year}`;   // Jan + Feb of this year
-  const fyCurr = `${year}-${year + 1}`;   // Mar-Dec of this year
-  return Array.from({ length: 12 }, (_, i) => {
-    const month = i + 1; // 1=Jan … 12=Dec
-    const fy = month <= 2 ? fyPrev : fyCurr;
-    const row = (histRows || []).find(r => r.financial_year === fy && r.month === month);
-    return { name: ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][i], revenue: row ? row.revenue : 0 };
-  });
-}
 import { formatCurrency } from '../../../lib/vg/helpers.js';
 import { useIsAdmin } from '../hooks/useCurrentMember.js';
 import { MONTH_SHORT } from '../../../lib/vg/constants.js';
-
-function buildMonthlyData(year, salesData, expensesData, bookingsData, unitCostsData, staffLogsData, category) {
-  return Array.from({ length: 12 }, (_, i) => {
-    const month = i + 1;
-    const monthStr = String(month).padStart(2, '0');
-    const from = `${year}-${monthStr}-01`;
-    const to = `${year}-${monthStr}-31`;
-
-    const inMonth = (dateStr) => dateStr >= from && dateStr <= to;
-
-    let revenue = 0;
-    let costs = 0;
-
-    if (category === 'accommodation') {
-      // Note: accommodation revenue is handled separately via accomm history table
-      revenue = 0;
-      costs = (unitCostsData || []).filter(c => inMonth(c.date)).reduce((t, c) => t + c.amount, 0);
-    } else if (category === 'staff') {
-      const logs = (staffLogsData || []).filter(l => l.month === month);
-      const staffCost = logs.reduce((t, l) => {
-        if (l.total_cash_paid != null && l.total_cash_paid > 0) return t + (l.total_cash_paid || 0) + (l.staff_expenses || 0);
-        return t + ((l.days_worked || 0) * (l.vg_staff?.daily_rate || 0)) + (l.bonus || 0) - (l.advance || 0);
-      }, 0);
-      const maintCost = (unitCostsData || []).filter(c => inMonth(c.date)).reduce((t, c) => t + c.amount, 0);
-      costs = staffCost + maintCost;
-      revenue = 0;
-    } else if (category === 'total') {
-      // Produce revenue (all categories)
-      revenue += (salesData || []).filter(s => inMonth(s.date)).reduce((t, s) => t + s.sell_price_actual * s.units, 0);
-      // Accommodation revenue — NOTE: total section does not include historical accommodation
-      // (only live bookings for current year are in vg_bookings; historical is in separate table)
-      revenue += (bookingsData || []).filter(b => b.check_in >= from && b.check_in <= to).reduce((t, b) => t + (b.total || 0), 0);
-      // All expenses
-      costs += (expensesData || []).filter(e => inMonth(e.date)).reduce((t, e) => t + e.amount, 0);
-      // Maintenance
-      costs += (unitCostsData || []).filter(c => inMonth(c.date)).reduce((t, c) => t + c.amount, 0);
-      // Staff
-      const logs = (staffLogsData || []).filter(l => l.month === month);
-      costs += logs.reduce((t, l) => {
-        if (l.total_cash_paid != null && l.total_cash_paid > 0) return t + (l.total_cash_paid || 0) + (l.staff_expenses || 0);
-        return t + ((l.days_worked || 0) * (l.vg_staff?.daily_rate || 0)) + (l.bonus || 0) - (l.advance || 0);
-      }, 0);
-    } else {
-      // Produce category filter
-      revenue = (salesData || []).filter(s => inMonth(s.date) && s.vg_products?.category === category).reduce((t, s) => t + s.sell_price_actual * s.units, 0);
-      costs = (expensesData || []).filter(e => inMonth(e.date) && e.category === category).reduce((t, e) => t + e.amount, 0);
-    }
-
-    return { name: MONTH_SHORT[i], revenue, costs, profit: revenue - costs };
-  });
-}
+import { buildAccommCalendarData, buildMonthlyData } from './historyData.js';
 
 const PRODUCE_COLORS = { olive_oil: '#6b7f5e', olives: '#8b9e6b', meat: '#c2a66d', other: '#9e8b6b' };
 const PRODUCE_KEYS = ['olive_oil','olives','meat','other'];
@@ -102,50 +38,42 @@ export default function VgHistory() {
     setCollapsed(c => ({ ...c, [key]: !c[key] }));
   }
 
-  const { data: sales } = useQuery({
+  // Filter the chosen year on the server and paginate; never turn a failed read into zeros.
+  const salesQuery = useQuery({
     queryKey: ['vg', 'history', 'sales', year],
-    queryFn: () => fetchSales().then(r => (r.data || []).filter(s => s.date?.startsWith(year.toString()))),
-    enabled: isAdmin,
+    queryFn: () => fetchHistoryRows('sales', year), enabled: isAdmin,
   });
-
-  const { data: expenses } = useQuery({
+  const expensesQuery = useQuery({
     queryKey: ['vg', 'history', 'expenses', year],
-    queryFn: () => fetchExpenses().then(r => (r.data || []).filter(e => e.date?.startsWith(year.toString()))),
-    enabled: isAdmin,
+    queryFn: () => fetchHistoryRows('expenses', year), enabled: isAdmin,
   });
-
-  const { data: bookings } = useQuery({
+  const bookingsQuery = useQuery({
     queryKey: ['vg', 'history', 'bookings', year],
-    queryFn: () => supabase.from('vg_bookings').select('check_in,check_out,total').gte('check_in', `${year}-01-01`).lte('check_in', `${year}-12-31`).then(r => r.data || []),
-    enabled: isAdmin,
+    queryFn: () => fetchHistoryRows('bookings', year), enabled: isAdmin,
   });
-
-  // Accommodation historical data — stored in vg_accomm_sales_history by financial year
-  // Fetch both FYs that overlap with the selected calendar year
-  const { data: accommHist } = useQuery({
+  const accommQuery = useQuery({
     queryKey: ['vg', 'history', 'accomm_hist', year],
-    queryFn: async () => {
-      const fyPrev = `${year - 1}-${year}`;
-      const fyCurr = `${year}-${year + 1}`;
-      const { data } = await supabase.from('vg_accomm_sales_history')
-        .select('financial_year,month,revenue')
-        .in('financial_year', [fyPrev, fyCurr]);
-      return data || [];
-    },
-    enabled: isAdmin,
+    queryFn: () => fetchHistoryRows('accommodation', year), enabled: isAdmin,
   });
-
-  const { data: unitCosts } = useQuery({
+  const unitCostsQuery = useQuery({
     queryKey: ['vg', 'history', 'unitCosts', year],
-    queryFn: () => fetchUnitCosts().then(r => (r.data || []).filter(c => c.date?.startsWith(year.toString()))),
-    enabled: isAdmin,
+    queryFn: () => fetchHistoryRows('unitCosts', year), enabled: isAdmin,
   });
-
-  const { data: staffLogs } = useQuery({
+  const staffLogsQuery = useQuery({
     queryKey: ['vg', 'history', 'staffLogs', year],
-    queryFn: () => fetchStaffLogsForYear(year).then(r => r.data || []),
-    enabled: isAdmin,
+    queryFn: () => fetchHistoryRows('staffLogs', year), enabled: isAdmin,
   });
+  const sales = salesQuery.data;
+  const expenses = expensesQuery.data;
+  const unitCosts = unitCostsQuery.data;
+  const staffLogs = staffLogsQuery.data;
+  const accommData = buildAccommCalendarData(accommQuery.data, year, bookingsQuery.data);
+  const sectionQueries = {
+    total: [salesQuery, expensesQuery, bookingsQuery, accommQuery, unitCostsQuery, staffLogsQuery],
+    farm_produce: [salesQuery],
+    accommodation: [accommQuery, bookingsQuery],
+    staff: [staffLogsQuery, unitCostsQuery],
+  };
 
   if (!isAdmin) {
     return (
@@ -182,6 +110,24 @@ export default function VgHistory() {
           const section = ALL_SECTIONS.find(s => s.key === key);
           if (!section) return null;
           const isCollapsed = !!collapsed[key];
+          const queries = sectionQueries[key];
+          const failed = queries.some(q => q.isError);
+          const loading = queries.some(q => q.isPending);
+          const hasData = key === 'accommodation' ? accommData.some(m => m.revenue !== null)
+            : key === 'total' ? accommData.some(m => m.revenue !== null) || [sales, expenses, unitCosts, staffLogs].some(rows => rows?.length)
+            : queries.some(q => q.data?.length);
+          if (failed || loading || !hasData) {
+            return (
+              <div key={key} className="rounded-2xl border border-[rgba(122,112,94,0.2)] bg-[rgba(255,252,247,0.95)] p-5">
+                <p className="text-[0.7rem] uppercase tracking-[0.16em] text-[rgba(75,71,65,0.6)] font-semibold mb-4">{section.title}</p>
+                <p role={failed ? 'alert' : 'status'} className="text-sm text-[rgba(75,71,65,0.6)]">
+                  {failed ? 'Could not load history. Please retry.' : loading ? 'Loading history…' : `No records for ${year}.`}
+                </p>
+                {failed && <button onClick={() => queries.forEach(q => q.refetch())} className="mt-3 text-sm">Retry</button>}
+              </div>
+            );
+          }
+
 
           if (section.special === 'produce') {
             const produceChartData = Array.from({ length: 12 }, (_, i) => {
@@ -243,7 +189,6 @@ export default function VgHistory() {
 
           // Accommodation section — uses vg_accomm_sales_history
           if (section.special === 'accommodation') {
-            const accommData = buildAccommCalendarData(accommHist, year);
             return (
               <div key={key} className="rounded-2xl border border-[rgba(122,112,94,0.2)] bg-[rgba(255,252,247,0.95)] p-5">
                 <div className="flex items-center gap-2 mb-4">
@@ -273,7 +218,7 @@ export default function VgHistory() {
           }
 
           // Standard section
-          const data = buildMonthlyData(year, sales, expenses, bookings, unitCosts, staffLogs, section.key);
+          const data = buildMonthlyData(year, sales, expenses, bookingsQuery.data, unitCosts, staffLogs, section.key, accommData);
           return (
             <div key={key} className="rounded-2xl border border-[rgba(122,112,94,0.2)] bg-[rgba(255,252,247,0.95)] p-5">
               <div className="flex items-center gap-2 mb-4">

@@ -29,7 +29,8 @@ const SHEEP_COLS = [
 ];
 
 const CATTLE_COLS = [
-  { key: 'total', label: 'Total', computed: true, color: '#6b7f5e' },
+  { key: 'opening', label: 'Opening', computed: true, color: '#7a8f9e' },
+  { key: 'total', label: 'Closing', computed: true, color: '#6b7f5e' },
   { key: 'cow', label: 'Cows', color: '#c2a66d' },
   { key: 'bull', label: 'Bulls', color: '#8b6f47' },
   { key: 'calf', label: 'Calves', color: '#8fb88f' },
@@ -40,7 +41,7 @@ const CATTLE_COLS = [
 ];
 
 function emptyRow(m) {
-  return { month: m, ewe: 0, ram: 0, lamb: 0, ewe_lamb: 0, ram_lamb: 0, cow: 0, bull: 0, calf: 0, births: 0, pregnant: 0, slaughtered: 0, deaths: 0, sold: 0 };
+  return { month: m, opening: 0, ewe: 0, ram: 0, lamb: 0, ewe_lamb: 0, ram_lamb: 0, cow: 0, bull: 0, calf: 0, births: 0, pregnant: 0, slaughtered: 0, deaths: 0, sold: 0 };
 }
 
 function aggregateYear(data) {
@@ -53,6 +54,7 @@ function aggregateYear(data) {
     if (!months[m]) months[m] = emptyRow(m);
     const cat = row.category; // 'ewe', 'ram', 'lamb', 'cow', 'bull', 'calf'
     months[m][cat] = row.closing_count || 0;
+    months[m].opening += row.opening_count || 0;
     months[m].births += row.births || 0;
     months[m].slaughtered += row.slaughtered || 0;
     months[m].deaths += row.deaths || 0;
@@ -105,7 +107,7 @@ function EditableCell({ value, onChange, disabled }) {
 
 // ─── Year Table ──────────────────────────────────────────────────────────
 
-function YearTable({ animalType, year, rows, onSave }) {
+function YearTable({ animalType, year, rows, onSave, onEditEvent }) {
   const cols = animalType === 'sheep' ? SHEEP_COLS : CATTLE_COLS;
   const categories = animalType === 'sheep' ? ['ewe', 'ram', 'ewe_lamb', 'ram_lamb'] : ['cow', 'bull', 'calf'];
 
@@ -141,7 +143,7 @@ function YearTable({ animalType, year, rows, onSave }) {
                       return (
                         <td key={col.key} className="px-3 py-2.5 text-center">
                           <span className="font-semibold text-[#6b7f5e] text-[0.85rem] bg-[rgba(107,127,94,0.08)] rounded px-2 py-0.5">
-                            {total}
+                            {col.key === 'opening' ? row.opening : total}
                           </span>
                         </td>
                       );
@@ -149,10 +151,11 @@ function YearTable({ animalType, year, rows, onSave }) {
                     const val = row[col.key] || 0;
                     return (
                       <td key={col.key} className="px-3 py-2.5 text-center text-[0.82rem]">
-                        <EditableCell
-                          value={val}
-                          onChange={(newVal) => onSave(row.month, col.key, newVal)}
-                        />
+                        {animalType === 'cattle' && ['births', 'slaughtered', 'deaths', 'sold'].includes(col.key) ? (
+                          <button className="bg-transparent p-1 shadow-none text-inherit" onClick={() => onEditEvent(row.month, col.key)} aria-label={`Edit ${col.label} for ${MONTH_SHORT[row.month - 1]}`}>
+                            {val || '—'}
+                          </button>
+                        ) : <EditableCell value={val} onChange={(newVal) => onSave(row.month, col.key, newVal)} />}
                       </td>
                     );
                   })}
@@ -162,6 +165,53 @@ function YearTable({ animalType, year, rows, onSave }) {
           </tbody>
         </table>
       </div>
+    </div>
+  );
+}
+
+/** Events belong to a sex/category, not automatically to cows. Edit each category
+ * separately so a bull sale/birth preserves the cow count and the generated balance.
+ */
+function CattleEventEditor({ event, data, year, onClose, onSaved }) {
+  const categories = ['cow', 'bull', 'calf'];
+  const [category, setCategory] = useState(event.category);
+  const existing = (data || []).find(r => r.month === event.month && r.category === category);
+  const [value, setValue] = useState(existing?.[event.field] || 0);
+  const [error, setError] = useState('');
+  const [saving, setSaving] = useState(false);
+  const labels = { cow: 'Cows', bull: 'Bulls', calf: 'Calves', births: 'Births', deaths: 'Deaths', slaughtered: 'Slaughter', sold: 'Sold' };
+  async function save(e) {
+    e.preventDefault(); setSaving(true); setError('');
+    try {
+      const row = { year, month: event.month, animal_type: 'cattle', category, [event.field]: Number(value) };
+      const projected = { ...existing, [event.field]: Number(value) };
+      const closing = (projected.opening_count || 0) + (projected.births || 0) + (projected.purchased || 0) - (projected.deaths || 0) - (projected.slaughtered || 0) - (projected.sold || 0);
+      if (closing < 0) { setError('This event would make the closing count negative. Check the opening count first.'); return; }
+      const result = existing
+        ? await supabase.from('vg_livestock_monthly').update({ [event.field]: Number(value) }).eq('id', existing.id)
+        : await supabase.from('vg_livestock_monthly').upsert(row, { onConflict: 'year,month,animal_type,category' });
+      if (result.error) throw result.error;
+      onSaved(); onClose();
+    } catch { setError('Could not save the event. Please retry.'); }
+    finally { setSaving(false); }
+  }
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/30">
+      <form role="dialog" aria-modal="true" aria-label="Edit cattle event" onSubmit={save} className="bg-[#fffaf2] rounded-2xl p-6 w-full max-w-sm space-y-4">
+        <h2>{labels[event.field]} · {MONTH_SHORT[event.month - 1]} {year}</h2>
+        <label className="block">Category
+          <select className="block w-full p-2" value={category} onChange={e => {
+            setCategory(e.target.value);
+            setValue((data || []).find(r => r.month === event.month && r.category === e.target.value)?.[event.field] || 0);
+          }}>{categories.map(c => <option key={c} value={c}>{labels[c]}</option>)}</select>
+        </label>
+        <label className="block">Count for this category
+          <input className="block w-full p-2" type="number" min="0" step="1" required value={value} onChange={e => setValue(e.target.value)} />
+        </label>
+        <p className="text-xs">This adjusts the selected category’s closing count. Sale revenue is recorded separately under Produce.</p>
+        {error && <p role="alert">{error}</p>}
+        <div className="flex gap-3"><button type="button" disabled={saving} onClick={onClose}>Cancel</button><button disabled={saving} type="submit">{saving ? 'Saving…' : 'Save'}</button></div>
+      </form>
     </div>
   );
 }
@@ -279,6 +329,7 @@ export default function VgAnimals() {
   const qc = useQueryClient();
   const [year, setYear] = useState(new Date().getFullYear());
   const [animalType, setAnimalType] = useState('sheep');
+  const [eventEdit, setEventEdit] = useState(null);
 
   const { data: rawData } = useQuery({
     queryKey: ['vg', 'livestock', animalType, year],
@@ -303,7 +354,7 @@ export default function VgAnimals() {
       // We store the value as opening_count since closing_count is generated
       const existing = (rawData || []).find(r => r.month === month && r.category === field);
       if (existing) {
-        await supabase.from('vg_livestock_monthly').update({ opening_count: value }).eq('id', existing.id);
+        await supabase.from('vg_livestock_monthly').update({ opening_count: value - (existing.births || 0) - (existing.purchased || 0) + (existing.deaths || 0) + (existing.slaughtered || 0) + (existing.sold || 0) }).eq('id', existing.id);
       } else {
         await supabase.from('vg_livestock_monthly').upsert({
           year, month, animal_type: animalType, category: field,
@@ -392,7 +443,12 @@ export default function VgAnimals() {
           <p className="text-[0.6rem] uppercase tracking-[0.2em] text-[rgba(75,71,65,0.45)] mb-4">
             {animalType === 'sheep' ? '🐑' : '🐄'} {capitalize(animalType)} — {year} · Click any cell to edit
           </p>
-          <YearTable animalType={animalType} year={year} rows={rows} onSave={handleSave} />
+          <YearTable animalType={animalType} year={year} rows={rows} onSave={handleSave} onEditEvent={(month, field) => {
+            const recorded = (rawData || []).find(r => r.month === month && r[field] > 0);
+            setEventEdit({ month, field, category: recorded?.category || 'cow' });
+          }} />
+          {animalType === 'cattle' && <p className="text-xs mt-3 text-[rgba(75,71,65,0.6)]">Opening + births + purchases − deaths − slaughter − sold = closing. Current month shows the latest recorded count.</p>}
+          {eventEdit && <CattleEventEditor event={eventEdit} data={rawData} year={year} onClose={() => setEventEdit(null)} onSaved={() => qc.invalidateQueries({ queryKey: ['vg', 'livestock', animalType, year] })} />}
         </section>
 
         {/* Line chart — total headcount trend */}
@@ -409,9 +465,9 @@ export default function VgAnimals() {
                     <Tooltip contentStyle={{ background: 'rgba(255,252,247,0.97)', border: '1px solid rgba(122,112,94,0.2)', borderRadius: 12, fontSize: 12 }} />
                     <Legend wrapperStyle={{ fontSize: '0.62rem', textTransform: 'uppercase', letterSpacing: '0.08em' }} />
                     <Line type="monotone" dataKey="Total" stroke="#6b7f5e" strokeWidth={2.5} dot={{ r: 4, fill: '#6b7f5e' }} />
-                    <Line type="monotone" dataKey="Ewes" stroke="#c2a66d" strokeWidth={1.5} dot={{ r: 3 }} strokeDasharray="4 2" />
-                    <Line type="monotone" dataKey="Rams" stroke="#8b6f47" strokeWidth={1.5} dot={{ r: 3 }} strokeDasharray="4 2" />
-                    {chartData.some(d => d.Lambs > 0) && <Line type="monotone" dataKey="Lambs" stroke="#8fb88f" strokeWidth={1.5} dot={{ r: 3 }} strokeDasharray="4 2" />}
+                    <Line name={animalType === 'cattle' ? 'Cows' : 'Ewes'} type="monotone" dataKey="Ewes" stroke="#c2a66d" strokeWidth={1.5} dot={{ r: 3 }} strokeDasharray="4 2" />
+                    <Line name={animalType === 'cattle' ? 'Bulls' : 'Rams'} type="monotone" dataKey="Rams" stroke="#8b6f47" strokeWidth={1.5} dot={{ r: 3 }} strokeDasharray="4 2" />
+                    {chartData.some(d => d.Lambs > 0) && <Line name={animalType === 'cattle' ? 'Calves' : 'Lambs'} type="monotone" dataKey="Lambs" stroke="#8fb88f" strokeWidth={1.5} dot={{ r: 3 }} strokeDasharray="4 2" />}
                     {chartData.some(d => d.Pregnant > 0) && <Line type="monotone" dataKey="Pregnant" stroke="#b89a6b" strokeWidth={1.5} dot={{ r: 3 }} strokeDasharray="2 3" />}
                   </LineChart>
                 </ResponsiveContainer>
