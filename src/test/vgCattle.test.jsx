@@ -22,7 +22,7 @@ async function mount(){
 describe('cattle event accounting',()=>{
  it('shows opening 11, closing 10 and edits the sold bull rather than a cow',async()=>{
   await mount();const row=screen.getByText('Sep',{selector:'td'}).closest('tr');
-  expect(within(row).getAllByRole('cell').map(e=>e.textContent)).toEqual(['Sep','11','10','8','2','—','—','—','—','1']);
+  expect(within(row).getAllByRole('cell').map(e=>e.textContent)).toEqual(['Sep','11','10','8','2','—','—','—','—','—','1']);
   fireEvent.click(screen.getByRole('button',{name:'Edit Sold for Sep'}));
   expect(screen.getByRole('combobox')).toHaveValue('bull');
   fireEvent.change(screen.getByRole('spinbutton'),{target:{value:'2'}});fireEvent.click(screen.getByRole('button',{name:'Save'}));

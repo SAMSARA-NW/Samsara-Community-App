@@ -35,6 +35,7 @@ const CATTLE_COLS = [
   { key: 'bull', label: 'Bulls', color: '#8b6f47' },
   { key: 'calf', label: 'Calves', color: '#8fb88f' },
   { key: 'births', label: 'Births', color: '#5a7a5a' },
+  { key: 'pregnant', label: 'Pregnant', color: '#b89a6b' },
   { key: 'slaughtered', label: 'Slaughter', color: '#8b4a4a' },
   { key: 'deaths', label: 'Deaths', color: '#6b4a4a' },
   { key: 'sold', label: 'Sold', color: '#4a6b8b' },
@@ -381,7 +382,11 @@ export default function VgAnimals() {
       // Store in notes field of first category
       const primaryCat = categories[0];
       const existing = (rawData || []).find(r => r.month === month && r.category === primaryCat);
-      const notes = `pregnant:${value}`;
+      // Preserve reconstruction/source notes when changing the informational pregnancy count.
+      const previousNotes = existing?.notes || '';
+      const notes = /pregnant:\d+/i.test(previousNotes)
+        ? previousNotes.replace(/pregnant:\d+/gi, `pregnant:${value}`)
+        : [previousNotes, `pregnant:${value}`].filter(Boolean).join(' ');
       if (existing) {
         await supabase.from('vg_livestock_monthly').update({ notes }).eq('id', existing.id);
       } else {
